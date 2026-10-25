@@ -1,0 +1,18 @@
+# iLO Certificate Renewal — Configuration
+# Copy to ilo-cert-renew.conf and set chmod 600
+
+# iLO hostname (FQDN matching the certificate CN)
+ILO_HOST="ilo.example.com"
+
+# Renew certificate when this many days remain
+RENEW_DAYS=30
+
+# certbot dns-rfc2136 credentials file
+CERTBOT_CREDENTIALS="/etc/bind/letsencrypt.ini"
+
+# CSR subject fields
+CSR_COUNTRY="US"
+CSR_STATE="State"
+CSR_CITY="City"
+CSR_ORG="Organization"
+CSR_ORG_UNIT="Unit"

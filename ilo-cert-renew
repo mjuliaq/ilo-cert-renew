@@ -1,0 +1,276 @@
+#!/bin/bash
+set -euo pipefail
+
+#
+# Script directory (all config relative to here)
+#
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/ilo-cert-renew.conf"
+NETRC_FILE="${SCRIPT_DIR}/.netrc"
+
+#
+# Usage
+#
+usage() {
+  echo "Usage: $0 [OPTIONS]"
+  echo ""
+  echo "Options:"
+  echo "  -c FILE            Config file (default: ${CONFIG_FILE})"
+  echo "  -h HOST            iLO hostname (overrides config)"
+  echo "  -d DAYS            Renew threshold in days (overrides config)"
+  echo "  -f                 Force renewal regardless of expiry"
+  echo "  --dry-run          Check configuration and expiry, make no changes"
+  echo "  --certbot-dry-run  Test certbot DNS challenge without issuing real cert"
+  echo "  --help             Show this help"
+  exit 1
+}
+
+#
+# Defaults
+#
+OVERRIDE_HOST=""
+OVERRIDE_DAYS=""
+FORCE=false
+DRY_RUN=false
+CERTBOT_DRY_RUN=false
+ILO_TOKEN=""
+ILO_SESSION=""
+ILO_USER=""
+ILO_PASS=""
+
+#
+# Argument parsing
+#
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -c) CONFIG_FILE="$2"; shift 2 ;;
+    -h) OVERRIDE_HOST="$2"; shift 2 ;;
+    -d) OVERRIDE_DAYS="$2"; shift 2 ;;
+    -f) FORCE=true; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --certbot-dry-run) CERTBOT_DRY_RUN=true; FORCE=true; shift ;;
+    --help) usage ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+#
+# Load and validate config
+#
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+  exit 1
+fi
+
+PERMS=$(stat -c "%a" "$CONFIG_FILE")
+if [[ "$PERMS" != "600" && "$PERMS" != "400" ]]; then
+  echo "ERROR: Config file $CONFIG_FILE has insecure permissions ($PERMS)." >&2
+  echo "       Run: chmod 600 $CONFIG_FILE" >&2
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+[[ -n "$OVERRIDE_HOST" ]] && ILO_HOST="$OVERRIDE_HOST"
+[[ -n "$OVERRIDE_DAYS" ]] && RENEW_DAYS="$OVERRIDE_DAYS"
+
+for var in ILO_HOST RENEW_DAYS CERTBOT_CREDENTIALS CSR_COUNTRY CSR_STATE CSR_CITY CSR_ORG CSR_ORG_UNIT; do
+  if [[ -z "${!var:-}" ]]; then
+    echo "ERROR: Required variable $var is not set in $CONFIG_FILE" >&2
+    exit 1
+  fi
+done
+
+#
+# Load and validate netrc
+#
+if [[ ! -f "$NETRC_FILE" ]]; then
+  echo "ERROR: netrc file not found: $NETRC_FILE" >&2
+  exit 1
+fi
+
+NETRC_PERMS=$(stat -c "%a" "$NETRC_FILE")
+if [[ "$NETRC_PERMS" != "600" && "$NETRC_PERMS" != "400" ]]; then
+  echo "ERROR: netrc file $NETRC_FILE has insecure permissions ($NETRC_PERMS)." >&2
+  echo "       Run: chmod 600 $NETRC_FILE" >&2
+  exit 1
+fi
+
+ILO_USER=$(awk '{for(i=1;i<=NF;i++){if($i=="machine")cur=$(i+1); if(cur=="'"${ILO_HOST}"'" && $i=="login"){print $(i+1);exit}}}' "$NETRC_FILE")
+ILO_PASS=$(awk '{for(i=1;i<=NF;i++){if($i=="machine")cur=$(i+1); if(cur=="'"${ILO_HOST}"'" && $i=="password"){print $(i+1);exit}}}' "$NETRC_FILE")
+
+if [[ -z "$ILO_USER" || -z "$ILO_PASS" ]]; then
+  echo "ERROR: Could not find credentials for ${ILO_HOST} in $NETRC_FILE" >&2
+  exit 1
+fi
+
+#
+# Working directory
+#
+WORK_DIR=$(mktemp -d /tmp/ilo-cert-renew.XXXXXX)
+cd "$WORK_DIR"
+
+#
+# Session management
+#
+ilo_login() {
+  local response
+  cat > payload.json <<EOF
+{"UserName": "${ILO_USER}", "Password": "${ILO_PASS}"}
+EOF
+  response=$(curl -sk -X POST \
+    -H "Content-Type: application/json" \
+    -d @payload.json \
+    -D - \
+    "https://${ILO_HOST}/redfish/v1/SessionService/Sessions/")
+  rm -f payload.json
+
+  ILO_TOKEN=$(echo "$response" | grep -i "^X-Auth-Token:" | tr -d '\r' | awk '{print $2}' || true)
+  ILO_SESSION=$(echo "$response" | grep -i "^Location:" | tr -d '\r' | awk '{print $2}' || true)
+
+  if [[ -z "$ILO_TOKEN" ]]; then
+    echo "ERROR: Failed to obtain session token from iLO." >&2
+    echo "       Check credentials in $NETRC_FILE and that the account" >&2
+    echo "       has 'Configure iLO Settings' privilege." >&2
+    exit 1
+  fi
+  echo "[$(date)] Session established."
+}
+
+ilo_logout() {
+  if [[ -n "${ILO_SESSION:-}" && -n "${ILO_TOKEN:-}" ]]; then
+    curl -sk -X DELETE \
+      --netrc-file "$NETRC_FILE" \
+      -H "X-Auth-Token: ${ILO_TOKEN}" \
+      "https://${ILO_HOST}${ILO_SESSION}" > /dev/null
+    echo "[$(date)] Session closed."
+  fi
+}
+
+cleanup() {
+  ilo_logout
+  cd /
+  rm -rf "$WORK_DIR"
+}
+
+trap cleanup EXIT
+
+#
+# Step 1: Check expiry
+#
+echo "[$(date)] Checking certificate expiry for ${ILO_HOST}..."
+
+EXPIRY=$(echo | openssl s_client -connect "${ILO_HOST}:443" 2>/dev/null \
+  | openssl x509 -noout -enddate 2>/dev/null \
+  | cut -d= -f2)
+
+if [[ -z "$EXPIRY" ]]; then
+  echo "ERROR: Could not retrieve certificate from ${ILO_HOST}" >&2
+  exit 1
+fi
+
+EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+NOW_EPOCH=$(date +%s)
+DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+echo "[$(date)] Days remaining: ${DAYS_LEFT} (threshold: ${RENEW_DAYS})"
+
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[$(date)] Dry run -- exiting without changes."
+  exit 0
+fi
+
+if [[ "$DAYS_LEFT" -gt "$RENEW_DAYS" && "$FORCE" == false ]]; then
+  echo "[$(date)] No renewal needed."
+  exit 0
+fi
+
+#
+# Establish session
+#
+ilo_login
+
+#
+# Step 2: Generate CSR on iLO via Redfish
+#
+echo "[$(date)] Requesting CSR generation from iLO..."
+curl -sk -X POST \
+  --netrc-file "$NETRC_FILE" \
+  -H "Content-Type: application/json" \
+  -H "X-Auth-Token: ${ILO_TOKEN}" \
+  -d "{
+    \"Action\": \"GenerateCSR\",
+    \"Country\": \"${CSR_COUNTRY}\",
+    \"State\": \"${CSR_STATE}\",
+    \"City\": \"${CSR_CITY}\",
+    \"OrgName\": \"${CSR_ORG}\",
+    \"OrgUnit\": \"${CSR_ORG_UNIT}\",
+    \"CommonName\": \"${ILO_HOST}\"
+  }" \
+  "https://${ILO_HOST}/redfish/v1/Managers/1/SecurityService/HttpsCert/" > /dev/null
+
+#
+# Step 3: Poll until CSR is ready
+#
+echo "[$(date)] Waiting for CSR generation (up to 5 minutes)..."
+CSR=""
+ATTEMPTS=0
+MAX_ATTEMPTS=10  # 10 x 30s = 5 min
+
+while [[ -z "$CSR" || "$CSR" == "null" || "$CSR" == "0" ]]; do
+  if [[ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]]; then
+    echo "ERROR: Timed out waiting for CSR from iLO." >&2
+    exit 1
+  fi
+  sleep 30
+  echo "[$(date)] Retrieval attempt $((ATTEMPTS + 1))/${MAX_ATTEMPTS}..."
+  RAW=$(curl -sk \
+    --netrc-file "$NETRC_FILE" \
+    "https://${ILO_HOST}/redfish/v1/Managers/1/SecurityService/HttpsCert/")
+  CSR=$(echo "$RAW" | awk -F'"' '/CertificateSigningRequest/{for(i=1;i<=NF;i++) if($i=="CertificateSigningRequest"){print $(i+2); exit}}' || true)
+  ATTEMPTS=$((ATTEMPTS + 1))
+done
+
+echo "$CSR" | awk '{gsub(/\\n/,"\n")}1' > ilo.csr
+echo "[$(date)] CSR retrieved."
+
+#
+# Step 4: Sign with certbot
+#
+echo "[$(date)] Running certbot (dns-rfc2136, CSR mode)..."
+[[ "$CERTBOT_DRY_RUN" == true ]] && echo "[$(date)] certbot dry-run mode active."
+CERTBOT_ARGS=(certonly
+  --dns-rfc2136
+  --dns-rfc2136-credentials "$CERTBOT_CREDENTIALS"
+  --csr ilo.csr
+  -d "$ILO_HOST"
+  --non-interactive
+  --agree-tos)
+[[ "$CERTBOT_DRY_RUN" == true ]] && CERTBOT_ARGS+=(--dry-run)
+certbot "${CERTBOT_ARGS[@]}"
+echo "[$(date)] certbot finished."
+
+if [[ "$CERTBOT_DRY_RUN" == true ]]; then
+  echo "[$(date)] certbot dry-run complete. Skipping certificate import."
+  exit 0
+fi
+
+#
+# Step 5: Import signed cert
+#
+echo "[$(date)] Re-establishing iLO session for certificate import..."
+ilo_login
+
+echo "[$(date)] Importing certificate into iLO..."
+CERT_CONTENTS=$(awk '{printf "%s\\n", $0}' 0000_cert.pem)
+cat > import.json <<EOF
+{"Action": "ImportCertificate", "Certificate": "${CERT_CONTENTS}"}
+EOF
+curl -sk -X POST \
+  --netrc-file "$NETRC_FILE" \
+  -H "Content-Type: application/json" \
+  -H "X-Auth-Token: ${ILO_TOKEN}" \
+  -d @import.json \
+  "https://${ILO_HOST}/redfish/v1/Managers/1/SecurityService/HttpsCert/" > /dev/null
+
+echo "[$(date)] Done. iLO will restart its web service in ~30 seconds."

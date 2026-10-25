@@ -1,0 +1,13 @@
+# certbot dns-rfc2136 credentials for ilo-cert-renew
+# Copy to ilo-cert-renew.ini (or any path) and set chmod 600.
+# Point CERTBOT_CREDENTIALS in ilo-cert-renew.conf at this file.
+#
+# Generate the TSIG key on your BIND server:
+#   tsig-keygen -a hmac-sha256 ilo-cert-renew
+# Copy the secret value from the output into dns_rfc2136_secret below.
+
+dns_rfc2136_server    = 127.0.0.1
+dns_rfc2136_port      = 53
+dns_rfc2136_name      = ilo-cert-renew
+dns_rfc2136_secret    = <base64-encoded-hmac-sha256-secret>
+dns_rfc2136_algorithm = HMAC-SHA256
