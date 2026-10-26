@@ -34,7 +34,7 @@ iLO restarts its HTTPS service \~30 seconds after import.
 | `openssl`                     | Read certificate expiry from iLO port 443         |
 | `awk`                         | Parse `.netrc` credentials; extract CSR from JSON |
 | `certbot`                     | Let's Encrypt ACME client                         |
-| `python3-certbot-dns-rfc2136` | certbot DNS-01 plugin (RFC 2136 / BIND)           |
+| `python3-certbot-dns-rfc2136` | certbot DNS-01 plugin (RFC 2136)                  |
 | `date` (GNU coreutils)        | Date arithmetic for expiry calculation            |
 | `logger` (util-linux)         | Route cron output to the system log               |
 
@@ -45,13 +45,6 @@ iLO restarts its HTTPS service \~30 seconds after import.
 ***
 
 ## Prerequisites
-
-### System packages
-
-```bash
-apt install certbot python3-certbot-dns-rfc2136   # Debian/Ubuntu
-dnf install certbot python3-certbot-dns-rfc2136   # RHEL/Fedora
-```
 
 ### DNS server: RFC 2136 dynamic updates
 
@@ -86,22 +79,6 @@ zone "example.com" {
 };
 ```
 
-### certbot credentials file
-
-Create `/opt/ilo-cert-renew/certbot.ini`:
-
-```ini
-dns_rfc2136_server = 127.0.0.1
-dns_rfc2136_port = 53
-dns_rfc2136_name = ilo-cert-renew
-dns_rfc2136_secret = <base64-key>
-dns_rfc2136_algorithm = HMAC-SHA256
-```
-
-```bash
-chmod 600 /opt/ilo-cert-renew/certbot.ini
-```
-
 ### iLO account
 
 Create a dedicated iLO account with the **Configure iLO Settings** privilege.
@@ -111,6 +88,8 @@ never in the config file.
 ***
 
 ## Installation
+
+Suggested target directory is `/opt/ilo-cert-renew/`
 
 ```bash
 mkdir -p /opt/ilo-cert-renew
@@ -141,11 +120,30 @@ CSR_ORG_UNIT="Your Unit"
 
 ### Credentials
 
+Create a `.netrc` file for the iLO credentials
+
 ```bash
 cat > /opt/ilo-cert-renew/.netrc <<'EOF'
 machine <ilo-hostname.example.com> login <ilo-user> password <ilo-password>
 EOF
 chmod 600 /opt/ilo-cert-renew/.netrc
+```
+
+Rename the sample `certbot.ini` credentials file:
+
+```bash
+cp /opt/ilo-cert-renew/certbot.ini.example /opt/ilo-cert-renew/certbot.ini
+chmod 600 /opt/ilo-cert-renew/certbot.ini
+```
+
+Edit `certbot.ini` with your local values:
+
+```ini
+dns_rfc2136_server = 127.0.0.1
+dns_rfc2136_port = 53
+dns_rfc2136_name = ilo-cert-renew
+dns_rfc2136_secret = <base64-key>
+dns_rfc2136_algorithm = HMAC-SHA256
 ```
 
 ***

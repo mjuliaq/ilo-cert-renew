@@ -8,7 +8,7 @@ ILO_HOST="ilo.example.com"
 RENEW_DAYS=30
 
 # certbot dns-rfc2136 credentials file
-CERTBOT_CREDENTIALS="/etc/bind/letsencrypt.ini"
+CERTBOT_CREDENTIALS="/opt/ilo-cert-renew/certbot.ini"
 
 # CSR subject fields
 CSR_COUNTRY="US"
