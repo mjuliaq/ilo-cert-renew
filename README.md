@@ -199,7 +199,7 @@ To replace a HPE self-signed certificate that hasn't expired or force renewal of
 
 ### Task Scheduling
 
-Schedule the task to in cron or your favorite system scheduler. The task in the example below runs daily at 03:17.
+Schedule the script to run in cron or your favorite system scheduler. The task in the example below runs daily at 03:17.
 
 ```cron
 17 3 * * * root /opt/ilo-cert-renew/ilo-cert-renew 2>&1 | logger -t ilo-cert-renew
