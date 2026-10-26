@@ -120,7 +120,7 @@ CSR_ORG_UNIT="Your Unit"
 
 ### Credentials
 
-Create a `.netrc` file for the iLO credentials
+Create a `.netrc` file and edit it to add the iLO username/password create before. 
 
 ```bash
 cat > /opt/ilo-cert-renew/.netrc <<'EOF'
