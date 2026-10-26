@@ -189,7 +189,9 @@ This runs the full iLO keypair generation and submits the CSR to Let's
 Encrypt staging, exercising the DNS-01 challenge end-to-end without issuing
 a real certificate.
 
-### Force renewal
+### First time run and force renewal
+
+To replace a HPE self-signed certificate that hasn't expired or force renewal of a current certificate use the `-f` switch
 
 ```bash
 /opt/ilo-cert-renew/ilo-cert-renew -f
